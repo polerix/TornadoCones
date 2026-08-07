@@ -2253,21 +2253,51 @@
         // Input
         // --- Input & Device Detection ---
 
-        // Simple Mobile Detection
-        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || (window.innerWidth < 800 && 'ontouchstart' in window);
+        // Mobile Detection
+        // Touch capability is static per device - used to decide whether to wire
+        // up joystick touch handling at all (harmless no-op on non-touch desktops).
+        const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
-        if (isMobile) {
-            document.body.classList.add('is-mobile');
+        // The "should we use the mobile layout" call is fuzzier and can change at
+        // runtime (rotation, split-screen/foldables, resizing a window near the
+        // threshold), so it's a function re-run on resize, not a one-time const.
+        function computeIsMobileLayout() {
+            return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+                || (window.innerWidth < 800 && hasTouch)
+                // iPadOS 13+ spoofs a desktop Safari/Mac user agent by default, and an
+                // iPad's width often exceeds the 800px check above - this is the
+                // standard way to still catch it as a touch device.
+                || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        }
+
+        function applyMobileLayout() {
+            const mobile = computeIsMobileLayout();
+            document.body.classList.toggle('is-mobile', mobile);
             const hint = document.getElementById('controls-hint');
             if (hint) {
-                hint.innerHTML = `
+                hint.innerHTML = mobile ? `
                     (TAP ANYWHERE) Launch/Drop<br>
                     (JOYSTICK) Fly<br>
+                    1. Survive while RED.<br>
+                    2. Get caught when GREEN.
+                ` : `
+                    [SPACE] Launch/Drop | [WASD/Arrows] Fly<br>
                     1. Survive while RED.<br>
                     2. Get caught when GREEN.
                 `;
             }
         }
+        applyMobileLayout();
+
+        // Re-classify on rotation/resize (e.g. a tablet crossing the width
+        // threshold, or a foldable/split-screen size change) rather than freezing
+        // the mobile/desktop layout choice at whatever was true on first paint.
+        let layoutResizeTimer = null;
+        window.addEventListener('resize', () => {
+            clearTimeout(layoutResizeTimer);
+            layoutResizeTimer = setTimeout(applyMobileLayout, 250);
+        });
+        window.addEventListener('orientationchange', applyMobileLayout);
 
         // 1. Keyboard (Desktop Primary)
         window.addEventListener('keydown', e => {
@@ -2315,8 +2345,11 @@
             if (gameState === 'START') return;
             if (gameState === 'PAUSED') return; // Ignore interactions when paused
 
-            // If touching joystick, ignore
-            if (e.target.closest('.joystick-container')) return;
+            // Ignore taps on the joystick or any other UI chrome (audio/pause icons,
+            // lore trigger, modals) - without this, preventDefault() below suppresses
+            // the browser's synthetic click on these buttons (breaking them on real
+            // touch devices) AND launches/drops the active disc as a side effect.
+            if (e.target.closest('.joystick-container, #audio-controls, .modal-overlay, #lore-trigger')) return;
 
             // Prevent default if it's a touch event to stop scrolling/zooming (except on buttons if any)
             if (e.type === 'touchstart') e.preventDefault();
@@ -2348,43 +2381,57 @@
         window.addEventListener('touchstart', handleInteraction, { passive: false });
 
         // 3. Joystick Logic (Mobile Movement)
-        if (isMobile) {
+        // Wired up for any touch-capable device, not just ones classified as
+        // "mobile layout" at load - that classification can change on resize/
+        // rotation (see applyMobileLayout above), and a device that's initially
+        // misjudged as desktop should still have working joystick input the
+        // moment CSS reveals it. It's a harmless no-op on non-touch desktops.
+        if (hasTouch) {
             const joystick = document.getElementById('joystick');
             const knob = document.getElementById('joystick-knob');
 
             let joystickActive = false;
-            let joyStartX, joyStartY;
+            let activeTouchId = null; // Track a specific touch by identifier, not by array
+            // index - touches[0] isn't guaranteed to stay "our" finger once a
+            // second touch (e.g. a tap-to-launch elsewhere) is added or removed.
+            let originX = 0, originY = 0; // Anchored to where the thumb actually
+            // touched down (see touchstart below), not the container's fixed
+            // center - anchoring to center made the knob (and the WASD input it
+            // drives) jump the instant you touched anywhere off-center.
             const maxRadius = 70; // Max drag distance
 
             joystick.addEventListener('touchstart', (e) => {
                 if (gameState === 'PAUSED') return;
+                if (joystickActive) return; // Already tracking a finger - ignore a second one landing here
                 e.preventDefault();
                 Announcer.recordInteraction();
-                joystickActive = true;
-                const touch = e.touches[0];
-                const rect = joystick.getBoundingClientRect();
-                const centerX = rect.left + rect.width / 2;
-                const centerY = rect.top + rect.height / 2;
 
-                updateJoystick(touch.clientX, touch.clientY, centerX, centerY);
+                const touch = e.changedTouches[0];
+                joystickActive = true;
+                activeTouchId = touch.identifier;
+                originX = touch.clientX;
+                originY = touch.clientY;
+
+                updateJoystick(0, 0);
             }, { passive: false });
 
             joystick.addEventListener('touchmove', (e) => {
                 if (gameState === 'PAUSED') return;
-                e.preventDefault();
                 if (!joystickActive) return;
-                const touch = e.touches[0];
-                const rect = joystick.getBoundingClientRect();
-                const centerX = rect.left + rect.width / 2;
-                const centerY = rect.top + rect.height / 2;
+                const touch = Array.from(e.touches).find(t => t.identifier === activeTouchId);
+                if (!touch) return; // This move doesn't belong to our tracked finger
+                e.preventDefault();
 
-                updateJoystick(touch.clientX, touch.clientY, centerX, centerY);
+                updateJoystick(touch.clientX - originX, touch.clientY - originY);
             }, { passive: false });
 
             const endJoystick = (e) => {
-                if (gameState === 'PAUSED') return;
+                if (!joystickActive) return;
+                const ended = Array.from(e.changedTouches).some(t => t.identifier === activeTouchId);
+                if (!ended) return; // A different finger ended - ours is still down
                 e.preventDefault();
                 joystickActive = false;
+                activeTouchId = null;
                 knob.style.transform = `translate(-50%, -50%) translate(0px, 0px)`;
                 keys.w = false;
                 keys.s = false;
@@ -2395,9 +2442,7 @@
             joystick.addEventListener('touchend', endJoystick);
             joystick.addEventListener('touchcancel', endJoystick);
 
-            function updateJoystick(clientX, clientY, centerX, centerY) {
-                let dx = clientX - centerX;
-                let dy = clientY - centerY;
+            function updateJoystick(dx, dy) {
                 const dist = Math.hypot(dx, dy);
 
                 // Clamp
