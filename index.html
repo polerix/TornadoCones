@@ -233,27 +233,33 @@
             }
         }
 
+        /* --scene-scale/--scene-top are computed in JS (fitMobileScene) from the
+           real viewport size and the actually-rendered HUD/joystick heights, so
+           the grid fits on short and narrow screens instead of a single fixed
+           0.42 that overflowed badly on smaller phones and in landscape. The
+           33%/66% keyframes keep the same relative wobble (~+1.2%/-1.2%) the
+           original fixed values used, just scaled off the dynamic base. */
         @keyframes gridWobbleMobile {
             0% {
-                transform: translateX(-50%) rotateX(60deg) rotateZ(0deg) scale(0.42);
+                transform: translateX(-50%) rotateX(60deg) rotateZ(0deg) scale(var(--scene-scale, 0.42));
             }
 
             33% {
-                transform: translateX(-51%) rotateX(62deg) rotateZ(1deg) scale(0.425);
+                transform: translateX(-51%) rotateX(62deg) rotateZ(1deg) scale(calc(var(--scene-scale, 0.42) * 1.0119));
             }
 
             66% {
-                transform: translateX(-49%) rotateX(58deg) rotateZ(-1deg) scale(0.415);
+                transform: translateX(-49%) rotateX(58deg) rotateZ(-1deg) scale(calc(var(--scene-scale, 0.42) * 0.9881));
             }
 
             100% {
-                transform: translateX(-50%) rotateX(61deg) rotateZ(1.5deg) scale(0.42);
+                transform: translateX(-50%) rotateX(61deg) rotateZ(1.5deg) scale(var(--scene-scale, 0.42));
             }
         }
 
         body.is-mobile .scene {
-            top: 25%;
-            transform: translateX(-50%) rotateX(60deg) scale(0.42);
+            top: var(--scene-top, 22%);
+            transform: translateX(-50%) rotateX(60deg) scale(var(--scene-scale, 0.42));
             animation: gridWobbleMobile 12s ease-in-out infinite alternate;
         }
 
@@ -420,18 +426,27 @@
             transform: translate(-50%, -50%);
             pointer-events: none;
             /* Let touches pass to container */
-            transition: transform 0.1s;
+            transition: transform 0.1s, width 0.15s, height 0.15s;
         }
 
-        /* Mobile State */
+        /* Mobile State - size/position come from --joystick-size/--joystick-bottom,
+           computed in JS (fitMobileScene) from the actual viewport so the joystick
+           (and the grid above it) fit on small/short/landscape screens instead of
+           the old fixed 240px+240px=480px reservation from the bottom edge. */
         body.is-mobile .joystick-container {
             display: block;
+            width: var(--joystick-size, 200px);
+            height: var(--joystick-size, 200px);
+            bottom: var(--joystick-bottom, 20px);
             background: rgba(255, 0, 255, 0.1);
             border: 2px solid rgba(255, 0, 255, 0.4);
             box-shadow: 0 0 20px rgba(255, 0, 255, 0.2);
+            transition: width 0.15s, height 0.15s, bottom 0.15s;
         }
 
         body.is-mobile .joystick-knob {
+            width: var(--joystick-knob-size, 84px);
+            height: var(--joystick-knob-size, 84px);
             background: rgba(255, 0, 255, 0.55);
             box-shadow: 0 0 15px rgba(255, 0, 255, 0.5);
         }
@@ -535,8 +550,14 @@
         }
 
         body.is-mobile .audio-icon {
-            width: 80px;
-            height: 80px;
+            /* 80px was oversized - shrink while staying above the ~44px
+               minimum touch target (Apple HIG / Material guidelines). */
+            width: 48px;
+            height: 48px;
+        }
+
+        body.is-mobile #audio-controls {
+            gap: 14px !important;
         }
 
         /* Lime Green (On). Black to #32CD32 approx, with glow effect matching SCORE */
@@ -2261,13 +2282,109 @@
         // The "should we use the mobile layout" call is fuzzier and can change at
         // runtime (rotation, split-screen/foldables, resizing a window near the
         // threshold), so it's a function re-run on resize, not a one-time const.
+        //
+        // Once we've positively identified a real phone/tablet (UA match, or the
+        // iPad heuristic), remember that and keep the mobile layout regardless of
+        // width - a phone rotated to landscape can easily exceed the 800px
+        // fallback check below (e.g. a 390-wide phone is 844 wide sideways),
+        // which would otherwise flip it back to the desktop/keyboard layout just
+        // from rotating. This is deliberately NOT applied to the width-only
+        // fallback itself, which stays purely reactive - that check alone is too
+        // ambiguous to commit to (a touch-capable desktop browser resized narrow
+        // would otherwise get stuck showing a giant joystick forever after).
+        let confirmedMobileDevice = false;
         function computeIsMobileLayout() {
-            return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
-                || (window.innerWidth < 800 && hasTouch)
-                // iPadOS 13+ spoofs a desktop Safari/Mac user agent by default, and an
-                // iPad's width often exceeds the 800px check above - this is the
-                // standard way to still catch it as a touch device.
-                || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+            const uaMatch = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+            // iPadOS 13+ spoofs a desktop Safari/Mac user agent by default, and an
+            // iPad's width often exceeds the 800px check below - this is the
+            // standard way to still catch it as a touch device.
+            const iPadMatch = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+            if (uaMatch || iPadMatch) confirmedMobileDevice = true;
+            return confirmedMobileDevice || (window.innerWidth < 800 && hasTouch);
+        }
+
+        // Fits the 3D grid and sizes the joystick to whatever vertical/horizontal
+        // space is actually available on this device, instead of the old fixed
+        // scale(0.42) + 480px bottom reservation that overflowed the viewport on
+        // shorter/narrower phones and in landscape (grid mostly off-screen).
+        function fitMobileScene() {
+            const root = document.documentElement;
+            if (!document.body.classList.contains('is-mobile')) {
+                root.style.removeProperty('--scene-scale');
+                root.style.removeProperty('--scene-top');
+                root.style.removeProperty('--joystick-size');
+                root.style.removeProperty('--joystick-knob-size');
+                root.style.removeProperty('--joystick-bottom');
+                return;
+            }
+
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+
+            // Joystick: comfortable touch size, but shrinks on short viewports
+            // (e.g. a landscape phone) instead of always eating 480px from the
+            // bottom edge regardless of how tall the screen actually is.
+            const joystickSize = Math.max(110, Math.min(190, vh * 0.26, vw * 0.4));
+            const joystickBottom = 16;
+            root.style.setProperty('--joystick-size', joystickSize.toFixed(0) + 'px');
+            root.style.setProperty('--joystick-knob-size', (joystickSize * 0.42).toFixed(0) + 'px');
+            root.style.setProperty('--joystick-bottom', joystickBottom + 'px');
+
+            // Measure the actual rendered HUD height (status/score/hint text)
+            // rather than guessing a constant - stays correct even if the hint
+            // text wraps differently across font sizes/widths.
+            const uiEl = document.getElementById('ui');
+            const hsEl = document.getElementById('high-score-display');
+            const uiBottom = uiEl ? uiEl.getBoundingClientRect().bottom : 0;
+            const hsBottom = hsEl ? hsEl.getBoundingClientRect().bottom : 0;
+            const topReserved = Math.max(uiBottom, hsBottom, 90) + 16;
+
+            const bottomReserved = joystickBottom + joystickSize + 20;
+            const availableW = vw - 32;
+            const availableH = vh - topReserved - bottomReserved;
+
+            // The grid sits under rotateX(60deg) + the body's perspective:800px,
+            // so its on-screen size is NOT simply proportional to `scale` - a
+            // larger scale pushes more of the tilted plane's depth toward the
+            // viewer, which the perspective projection expands non-linearly
+            // (measured: width/scale and height/scale both grow with scale, they
+            // aren't constant). Rather than fit an approximation to that curve,
+            // measure the real rendered size at a candidate scale and converge.
+            const scene = document.querySelector('.scene');
+            const grid = document.getElementById('grid');
+            const prevAnimation = scene.style.animation;
+            scene.style.animation = 'none'; // freeze the wobble for a stable measurement
+
+            let scale = 0.35;
+            for (let i = 0; i < 6; i++) {
+                root.style.setProperty('--scene-scale', scale.toFixed(4));
+                void scene.offsetHeight; // force reflow so getBoundingClientRect reflects this scale
+                const r = grid.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) break;
+                const ratio = Math.min(availableW / r.width, availableH / r.height);
+                if (Math.abs(ratio - 1) < 0.02) break; // close enough
+                // Damped step (0.9) so the search converges instead of oscillating
+                // around the non-linear curve.
+                scale = Math.max(0.15, Math.min(0.55, scale * (1 + (ratio - 1) * 0.9)));
+            }
+            root.style.setProperty('--scene-scale', scale.toFixed(4));
+
+            // `top` positions the pre-transform box, but rotateX + the ancestor's
+            // perspective project that non-uniformly onto the screen (points at
+            // different simulated depths shift by different amounts), so a target
+            // Y position can't be computed by formula either - converge on it the
+            // same way, correcting by the measured error each pass.
+            let sceneTop = topReserved;
+            for (let i = 0; i < 4; i++) {
+                root.style.setProperty('--scene-top', sceneTop.toFixed(0) + 'px');
+                void scene.offsetHeight;
+                const r = grid.getBoundingClientRect();
+                const desiredTop = topReserved + Math.max(0, (availableH - r.height) / 2);
+                const delta = desiredTop - r.top;
+                if (Math.abs(delta) < 2) break;
+                sceneTop += delta;
+            }
+            scene.style.animation = prevAnimation || ''; // restore the wobble animation
         }
 
         function applyMobileLayout() {
@@ -2286,6 +2403,7 @@
                     2. Get caught when GREEN.
                 `;
             }
+            fitMobileScene();
         }
         applyMobileLayout();
 
@@ -2398,7 +2516,15 @@
             // touched down (see touchstart below), not the container's fixed
             // center - anchoring to center made the knob (and the WASD input it
             // drives) jump the instant you touched anywhere off-center.
-            const maxRadius = 70; // Max drag distance
+
+            // Derived from the container's actual rendered size (which is now
+            // dynamic - see fitMobileScene/--joystick-size) rather than a
+            // hardcoded 70px tuned for the old fixed 240px container, so the
+            // drag distance and deadzone stay proportionally correct at any size.
+            function getMaxRadius() {
+                const rect = joystick.getBoundingClientRect();
+                return Math.max(24, rect.width / 2 - 10);
+            }
 
             joystick.addEventListener('touchstart', (e) => {
                 if (gameState === 'PAUSED') return;
@@ -2443,6 +2569,7 @@
             joystick.addEventListener('touchcancel', endJoystick);
 
             function updateJoystick(dx, dy) {
+                const maxRadius = getMaxRadius();
                 const dist = Math.hypot(dx, dy);
 
                 // Clamp
@@ -2455,9 +2582,9 @@
                 // Move Knob
                 knob.style.transform = `translate(-50%, -50%) translate(${dx}px, ${dy}px)`;
 
-                // Map to Keys (WASD)
-                // Thresholds
-                const threshold = 20;
+                // Map to Keys (WASD) - same ~28.6% deadzone ratio as the
+                // original fixed 20/70, just scaled to the current size.
+                const threshold = maxRadius * (20 / 70);
                 keys.w = dy < -threshold;
                 keys.s = dy > threshold;
                 keys.a = dx < -threshold;
